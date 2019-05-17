@@ -348,6 +348,7 @@ class IasLibPtpDaemon
     uint64_t                mTscFreq;
     uint64_t                mRawToLocalTstampThreshold;
     std::vector<double>  mRawToLocalFactors;
+    bool                  mDirectDmaEn;
 }; // class IasLibPtpDaemon
 
 inline uint64_t IasLibPtpDaemon::getTsc()

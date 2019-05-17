@@ -2090,11 +2090,16 @@ IasAvbProcessingResult IasAvbStreamHandler::start( bool resume)
         device_t * pIgbDev = IasAvbStreamHandlerEnvironment::getIgbDevice();
         if (pIgbDev)
         {
-          int32_t err = igb_init(pIgbDev);
-          if (err)
+          std::string nwIfType = "direct-dma";
+          (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cNwIfType, nwIfType);
+          if ("direct-dma" == nwIfType)
           {
-            DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " Resume: igb_init failed (", int32_t(err), ")");
-            result = eIasAvbProcInitializationFailed;
+            int32_t err = igb_init(pIgbDev);
+            if (err)
+            {
+              DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " Resume: igb_init failed (", int32_t(err), ")");
+              result = eIasAvbProcInitializationFailed;
+            }
           }
         }
         else

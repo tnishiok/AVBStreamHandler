@@ -26,6 +26,7 @@
 #include "avb_watchdog/IasWatchdogInterface.hpp"
 #include <mutex>
 #include <set>
+#include <linux/if_packet.h>
 
 namespace IasMediaTransportAvb {
 
@@ -306,6 +307,10 @@ class IasAvbTransmitSequencer : private IasMediaTransportAvb::IasIRunnable
 
     inline bool isInitialized() const;
 
+    IasAvbProcessingResult openXmitSock();
+
+    int sockXmit(IasAvbPacket* packet);
+
     ///
     /// Member Variables
     ///
@@ -335,6 +340,9 @@ class IasAvbTransmitSequencer : private IasMediaTransportAvb::IasIRunnable
     bool                  mFirstRun;
     bool                  mBTMEnable;
     bool                  mStrictPktOrderEn;
+    bool                  mDirectDmaEn;
+    int32_t               mTransmitSocket;
+    struct sockaddr_ll    mDescSockAddr;
 };
 
 

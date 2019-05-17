@@ -85,6 +85,7 @@ IasLibPtpDaemon::IasLibPtpDaemon(std::string const &sharedMemoryName, uint32_t c
   , mTscFreq(0u)
   , mRawToLocalTstampThreshold(cRawTimeMeasurementThreshold)
   , mRawToLocalFactors()
+  , mDirectDmaEn(true)
 {
   DLT_LOG_CXX(*mLog,  DLT_LOG_VERBOSE, LOG_PREFIX);
 }
@@ -125,26 +126,31 @@ IasAvbProcessingResult IasLibPtpDaemon::init()
   }
   else
   {
-    // open shared memory provided by PTP daemon
-    mSharedMemoryFd = shm_open(mSharedMemoryName.c_str(), O_RDWR, 0);
-    if (-1 == mSharedMemoryFd)
+    std::string ptpDaemon = "daemon_cl";
+    (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cPtpDaemon, ptpDaemon);
+    if ("daemon_cl" == ptpDaemon)
     {
-      DLT_LOG_CXX(*mLog,  DLT_LOG_ERROR, LOG_PREFIX, "Couldn't open shared memory:", strerror(errno));
-      result = eIasAvbProcInitializationFailed;
-    }
-
-    // Map the shared memory device into virtual memory
-    if (eIasAvbProcOK == result)
-    {
-      mMemoryOffsetBuffer = static_cast<uint8_t*>(mmap(NULL, mSharedMemorySize, PROT_READ | PROT_WRITE, MAP_SHARED, mSharedMemoryFd, 0));
-      if (MAP_FAILED == mMemoryOffsetBuffer)
+      // open shared memory provided by PTP daemon
+      mSharedMemoryFd = shm_open(mSharedMemoryName.c_str(), O_RDWR, 0);
+      if (-1 == mSharedMemoryFd)
       {
-        DLT_LOG_CXX(*mLog,  DLT_LOG_ERROR, LOG_PREFIX, "mmap() failed!");
-        mMemoryOffsetBuffer = NULL;
-        shm_unlink(SHM_NAME);
+        DLT_LOG_CXX(*mLog,  DLT_LOG_ERROR, LOG_PREFIX, "Couldn't open shared memory:", strerror(errno));
         result = eIasAvbProcInitializationFailed;
       }
-    }
+
+      // Map the shared memory device into virtual memory
+      if (eIasAvbProcOK == result)
+      {
+        mMemoryOffsetBuffer = static_cast<uint8_t*>(mmap(NULL, mSharedMemorySize, PROT_READ | PROT_WRITE, MAP_SHARED, mSharedMemoryFd, 0));
+        if (MAP_FAILED == mMemoryOffsetBuffer)
+        {
+          DLT_LOG_CXX(*mLog,  DLT_LOG_ERROR, LOG_PREFIX, "mmap() failed!");
+          mMemoryOffsetBuffer = NULL;
+          shm_unlink(SHM_NAME);
+          result = eIasAvbProcInitializationFailed;
+        }
+      }
+    } // if daemon_cl
 
     if (eIasAvbProcOK == result)
     {
@@ -187,6 +193,12 @@ IasAvbProcessingResult IasLibPtpDaemon::init()
        * those cases.
        */
       mIgbDevice = IasAvbStreamHandlerEnvironment::getIgbDevice();
+      std::string nwIfType = "direct-dma";
+      (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cNwIfType, nwIfType);
+      if ("direct-dma" != nwIfType)
+      {
+        mDirectDmaEn = false;
+      }
 
       // initialize cross-timestamp parameters before getting initial cross-timestamp in calculateConversionCoeffs()
       IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cPtpXtstampThresh, mSysTimeMeasurementThreshold);
@@ -540,6 +552,13 @@ bool IasLibPtpDaemon::isPtpReady()
     {
       ptpReadyState = false;
     }
+  }
+
+  std::string ptpDaemon = "daemon_cl";
+  (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cPtpDaemon, ptpDaemon);
+  if ("daemon_cl" != ptpDaemon)
+  {
+    ptpReadyState = true;
   }
 
   if (ptpReadyState)
@@ -921,103 +940,110 @@ IasAvbProcessingResult IasLibPtpDaemon::getIgbTime(uint64_t &ptpTime, uint64_t &
   uint64_t sysTimeMeasurementIntervalMin = std::numeric_limits<uint64_t>::max();
   const uint64_t cXtstampThreshold = (cSysClockId == clockId) ? mSysTimeMeasurementThreshold : mRawToLocalTstampThreshold;
 
-  ptpTime = 0u;
-  sysTime = 0u;
-
-  for (uint64_t i = 0u; i < mMaxCrossTimestampSamples; i++)
+  if (mDirectDmaEn)
   {
-    /*
-     * The value of cMaxCrossTimestampSamples is 3 by default.
-     *
-     * This method gets the ptp/monotonic cross-timestamp maximum 3 times then returns the most accurate one.
-     * More iteration could provide higher accuracy. But since it has to lock the IGB device to access the registers
-     * and the lock might block the TX sequencer which calls igb_xmit(), the number of iteration should be limited.
-     *
-     * It took one third cpu time to read the I210 clock from the registers compared to the general approach
-     * using the clock_gettime(). Then we may do the iteration at least 3 times to get better accuracy without
-     * increasing cpu load. (approx time needed on MRB: direct register access 3 us, clock_gettime 10 us)
-     */
+    ptpTime = 0u;
+    sysTime = 0u;
 
-    if ((NULL == mIgbDevice) || (0 != igb_lock(mIgbDevice)) ||
-        ((cSysClockId != clockId) && (cRawClockId != clockId)) )
+    for (uint64_t i = 0u; i < mMaxCrossTimestampSamples; i++)
     {
-      result = eIasAvbProcErr;
-      break;
-    }
-    else
-    {
-      uint64_t sys1 = 0u;
-      uint64_t sys2 = 0u;
+      /*
+       * The value of cMaxCrossTimestampSamples is 3 by default.
+       *
+       * This method gets the ptp/monotonic cross-timestamp maximum 3 times then returns the most accurate one.
+       * More iteration could provide higher accuracy. But since it has to lock the IGB device to access the registers
+       * and the lock might block the TX sequencer which calls igb_xmit(), the number of iteration should be limited.
+       *
+       * It took one third cpu time to read the I210 clock from the registers compared to the general approach
+       * using the clock_gettime(). Then we may do the iteration at least 3 times to get better accuracy without
+       * increasing cpu load. (approx time needed on MRB: direct register access 3 us, clock_gettime 10 us)
+       */
 
-      uint32_t tsauxcReg = 0u;
-      uint32_t stmph0Reg = 0u;
-      uint32_t stmpl0Reg = 0u;
-
-      (void) igb_readreg(mIgbDevice, TSAUXC, &tsauxcReg);
-      tsauxcReg |= TSAUXC_SAMP_AUTO;
-
-      // clear the value stored in AUXSTMPH/L0
-      (void) igb_readreg(mIgbDevice, AUXSTMPH0, &stmph0Reg);
-
-      sys1 = (cSysClockId == clockId) ? getTsc() : getRaw();
-
-      // set the SAMP_AUT0 flag to latch the SYSTIML/H registers
-      (void) igb_writereg(mIgbDevice, TSAUXC, tsauxcReg);
-
-      // memory fence to avoid reading the registers before writing the SAMP_AUT0 flag
-      __asm__ __volatile__("mfence;"
-                  :
-                  :
-                  : "memory");
-
-      sys2 = (cSysClockId == clockId) ? getTsc() : getRaw();
-
-      // read the stored values
-      (void) igb_readreg(mIgbDevice, AUXSTMPH0, &stmph0Reg);
-      (void) igb_readreg(mIgbDevice, AUXSTMPL0, &stmpl0Reg);
-
-      (void) igb_unlock(mIgbDevice);
-
-      sysTimeMeasurementInterval = sys2 - sys1;
-      if (sysTimeMeasurementInterval < sysTimeMeasurementIntervalMin)
+      if ((NULL == mIgbDevice) || (0 != igb_lock(mIgbDevice)) ||
+          ((cSysClockId != clockId) && (cRawClockId != clockId)) )
       {
-        sysTime = (sys1 >> 1) + (sys2 >> 1);
-        ptpTime = stmph0Reg * uint64_t(1000000000u) + stmpl0Reg;
-        sysTimeMeasurementIntervalMin = sysTimeMeasurementInterval;
+        result = eIasAvbProcErr;
+        break;
+      }
+      else
+      {
+        uint64_t sys1 = 0u;
+        uint64_t sys2 = 0u;
 
-        if (sysTimeMeasurementIntervalMin <= cXtstampThreshold)
+        uint32_t tsauxcReg = 0u;
+        uint32_t stmph0Reg = 0u;
+        uint32_t stmpl0Reg = 0u;
+
+        (void) igb_readreg(mIgbDevice, TSAUXC, &tsauxcReg);
+        tsauxcReg |= TSAUXC_SAMP_AUTO;
+
+        // clear the value stored in AUXSTMPH/L0
+        (void) igb_readreg(mIgbDevice, AUXSTMPH0, &stmph0Reg);
+
+        sys1 = (cSysClockId == clockId) ? getTsc() : getRaw();
+
+        // set the SAMP_AUT0 flag to latch the SYSTIML/H registers
+        (void) igb_writereg(mIgbDevice, TSAUXC, tsauxcReg);
+
+        // memory fence to avoid reading the registers before writing the SAMP_AUT0 flag
+        __asm__ __volatile__("mfence;"
+                    :
+                    :
+                    : "memory");
+
+        sys2 = (cSysClockId == clockId) ? getTsc() : getRaw();
+
+        // read the stored values
+        (void) igb_readreg(mIgbDevice, AUXSTMPH0, &stmph0Reg);
+        (void) igb_readreg(mIgbDevice, AUXSTMPL0, &stmpl0Reg);
+
+        (void) igb_unlock(mIgbDevice);
+
+        sysTimeMeasurementInterval = sys2 - sys1;
+        if (sysTimeMeasurementInterval < sysTimeMeasurementIntervalMin)
         {
-          // immediately exit the loop once we get cross-timestamp with the target accuracy
-          break;
+          sysTime = (sys1 >> 1) + (sys2 >> 1);
+          ptpTime = stmph0Reg * uint64_t(1000000000u) + stmpl0Reg;
+          sysTimeMeasurementIntervalMin = sysTimeMeasurementInterval;
+
+          if (sysTimeMeasurementIntervalMin <= cXtstampThreshold)
+          {
+            // immediately exit the loop once we get cross-timestamp with the target accuracy
+            break;
+          }
         }
       }
     }
+
+    if (cRawClockId == clockId)
+    {
+      mDiag.rawXCount++;
+      if (cXtstampThreshold < sysTimeMeasurementIntervalMin)
+      {
+        mDiag.rawXFail++;
+        result = eIasAvbProcErr;
+      }
+
+      // statistics for analysis
+      if (mDiag.rawXMaxInt < sysTimeMeasurementInterval)
+      {
+        mDiag.rawXMaxInt = sysTimeMeasurementInterval;
+      }
+      if ((0u == mDiag.rawXMinInt) || (sysTimeMeasurementInterval < mDiag.rawXMinInt))
+      {
+        mDiag.rawXMinInt = sysTimeMeasurementInterval;
+      }
+      mDiag.rawXTotalInt += sysTimeMeasurementInterval;
+
+      const double rawXSuccessRate = double(mDiag.rawXCount - mDiag.rawXFail)/double(mDiag.rawXCount);
+      const double rawXAvgInterval = double(mDiag.rawXTotalInt) / double(mDiag.rawXCount);
+      DLT_LOG_CXX(*mLog, DLT_LOG_DEBUG, LOG_PREFIX, "raw-x-tstamp diag: success rate avg =",
+                  rawXSuccessRate, "interval avg =", rawXAvgInterval, "max =", mDiag.rawXMaxInt, "min =", mDiag.rawXMinInt);
+    }
   }
-
-  if (cRawClockId == clockId)
+  else
   {
-    mDiag.rawXCount++;
-    if (cXtstampThreshold < sysTimeMeasurementIntervalMin)
-    {
-      mDiag.rawXFail++;
-      result = eIasAvbProcErr;
-    }
-
-    // statistics for analysis
-    if (mDiag.rawXMaxInt < sysTimeMeasurementInterval)
-    {
-      mDiag.rawXMaxInt = sysTimeMeasurementInterval;
-    }
-    if ((0u == mDiag.rawXMinInt) || (sysTimeMeasurementInterval < mDiag.rawXMinInt))
-    {
-      mDiag.rawXMinInt = sysTimeMeasurementInterval;
-    }
-    mDiag.rawXTotalInt += sysTimeMeasurementInterval;
-
-    const double rawXSuccessRate = double(mDiag.rawXCount - mDiag.rawXFail)/double(mDiag.rawXCount);
-    const double rawXAvgInterval = double(mDiag.rawXTotalInt) / double(mDiag.rawXCount);
-    DLT_LOG_CXX(*mLog, DLT_LOG_DEBUG, LOG_PREFIX, "raw-x-tstamp diag: success rate avg =",
-                rawXSuccessRate, "interval avg =", rawXAvgInterval, "max =", mDiag.rawXMaxInt, "min =", mDiag.rawXMinInt);
+    result = eIasAvbProcErr;
   }
 
   return result;

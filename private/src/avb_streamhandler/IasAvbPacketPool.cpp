@@ -30,7 +30,8 @@ IasAvbPacketPool::IasAvbPacketPool(DltContext &dltContext) :
   mPoolSize(0u),
   mFreeBufferStack(),
   mBase(NULL),
-  mDmaPages()
+  mDmaPages(),
+  mDirectDmaEn(true)
 {
   // do nothing
 }
@@ -93,95 +94,120 @@ IasAvbProcessingResult IasAvbPacketPool::init(const size_t packetSize, const uin
       }
     }
 
-    if (eIasAvbProcOK == ret)
+    std::string nwIfType = "direct-dma";
+    (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cNwIfType, nwIfType);
+    if ("direct-dma" != nwIfType)
     {
-      device_t* igbDevice = IasAvbStreamHandlerEnvironment::getIgbDevice();
-      Page* page = NULL;
+      mDirectDmaEn = false;
+    }
 
-      if (NULL == igbDevice)
-      {
-        /*
-         * @log Init failed: Returned igbDevice == nullptr
-         */
-        DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " Failed to getIgbDevice!");
-        ret = eIasAvbProcInitializationFailed;
-      }
-      else
-      {
-        page = new (nothrow) Page;
-
-        if (NULL == page)
-        {
-          /*
-           * @log Not enough memory: Couldn't allocate DMA page, Page corresponds to underlying igb_dma_alloc struct.
-           */
-          DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " Not enough memory to allocate Page!");
-          ret = eIasAvbProcNotEnoughMemory;
-        }
-      }
-
+    if (mDirectDmaEn)
+    {
       if (eIasAvbProcOK == ret)
       {
-        // allocate one DMA page to retrieve properties
-        if (0 != igb_dma_malloc_page( igbDevice, page ))
+        device_t* igbDevice = IasAvbStreamHandlerEnvironment::getIgbDevice();
+        Page* page = NULL;
+
+        if (NULL == igbDevice)
         {
           /*
-           * @log Init failed: Failed to retrieve DMA page.
+           * @log Init failed: Returned igbDevice == nullptr
            */
-          DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " Failed to igb_dma_malloc_page!");
+          DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " Failed to getIgbDevice!");
           ret = eIasAvbProcInitializationFailed;
         }
         else
         {
-          uint32_t packetCountTotal = 0u;
-          mPacketSize = packetSize;
+          page = new (nothrow) Page;
 
-          // find out how many packets fit into a page
-          const uint32_t packetsPerPage = uint32_t( size_t(page->mmap_size) / packetSize );
-
-          if (0u == packetsPerPage)
+          if (NULL == page)
           {
-            // packetSize larger than dma page size - not supported by libigb
             /*
-             * @log Unsupported format: Packet size is larger than the dma page size - not supported by libigb.
+             * @log Not enough memory: Couldn't allocate DMA page, Page corresponds to underlying igb_dma_alloc struct.
              */
-            DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " packet size > ",
-                page->mmap_size, "not supported!");
-            ret = eIasAvbProcUnsupportedFormat;
+            DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " Not enough memory to allocate Page!");
+            ret = eIasAvbProcNotEnoughMemory;
+          }
+        }
+
+        if (eIasAvbProcOK == ret)
+        {
+          // allocate one DMA page to retrieve properties
+          if (0 != igb_dma_malloc_page( igbDevice, page ))
+          {
+            /*
+             * @log Init failed: Failed to retrieve DMA page.
+             */
+            DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " Failed to igb_dma_malloc_page!");
+            ret = eIasAvbProcInitializationFailed;
           }
           else
           {
-            const uint32_t pagesNeeded = (poolSize + (packetsPerPage - 1u)) / packetsPerPage;
+            uint32_t packetCountTotal = 0u;
+            mPacketSize = packetSize;
 
-            DLT_LOG_CXX(*mLog, DLT_LOG_DEBUG, LOG_PREFIX, " DMA page overhead (bytes:",
-                (uint64_t(pagesNeeded) * uint64_t(page->mmap_size)) - (uint64_t(poolSize) * uint64_t(packetSize)));
+            // find out how many packets fit into a page
+            const uint32_t packetsPerPage = uint32_t( size_t(page->mmap_size) / packetSize );
 
-            mDmaPages.reserve(pagesNeeded);
-
-            ret = initPage( page, packetsPerPage, packetCountTotal );
-
-            // 1st page is already allocated
-            for (uint32_t pageCount = 1u; (eIasAvbProcOK == ret) && (pageCount < pagesNeeded); pageCount++)
+            if (0u == packetsPerPage)
             {
-              page = new (nothrow) Page;
+              // packetSize larger than dma page size - not supported by libigb
+              /*
+               * @log Unsupported format: Packet size is larger than the dma page size - not supported by libigb.
+               */
+              DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " packet size > ",
+                  page->mmap_size, "not supported!");
+              ret = eIasAvbProcUnsupportedFormat;
+            }
+            else
+            {
+              const uint32_t pagesNeeded = (poolSize + (packetsPerPage - 1u)) / packetsPerPage;
 
-              if (NULL == page)
+              DLT_LOG_CXX(*mLog, DLT_LOG_DEBUG, LOG_PREFIX, " DMA page overhead (bytes:",
+                  (uint64_t(pagesNeeded) * uint64_t(page->mmap_size)) - (uint64_t(poolSize) * uint64_t(packetSize)));
+
+              mDmaPages.reserve(pagesNeeded);
+
+              ret = initPage( page, packetsPerPage, packetCountTotal );
+
+              // 1st page is already allocated
+              for (uint32_t pageCount = 1u; (eIasAvbProcOK == ret) && (pageCount < pagesNeeded); pageCount++)
               {
-                DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " Not enough memory to allocate Page!");
-                ret = eIasAvbProcNotEnoughMemory;
-              }
-              else if (0 != igb_dma_malloc_page( igbDevice, page ))
-              {
-                DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " igb dma memory allocation failure");
-                ret = eIasAvbProcInitializationFailed;
-              }
-              else
-              {
-                ret = initPage( page, packetsPerPage, packetCountTotal );
+                page = new (nothrow) Page;
+
+                if (NULL == page)
+                {
+                  DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " Not enough memory to allocate Page!");
+                  ret = eIasAvbProcNotEnoughMemory;
+                }
+                else if (0 != igb_dma_malloc_page( igbDevice, page ))
+                {
+                  DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, " igb dma memory allocation failure");
+                  ret = eIasAvbProcInitializationFailed;
+                }
+                else
+                {
+                  ret = initPage( page, packetsPerPage, packetCountTotal );
+                }
               }
             }
           }
         }
+      }
+    }
+    else // if !mDirectDmaEn
+    {
+      for (uint32_t i = 0; i < poolSize; i++)
+      {
+        mBase[i].vaddr = calloc(packetSize, 1);
+        if (nullptr == mBase[i].vaddr)
+        {
+          ret = eIasAvbProcNotEnoughMemory;
+          break;
+        }
+        mBase[i].len = static_cast<uint32_t>(packetSize);
+        mBase[i].setHomePool( this );
+        mFreeBufferStack.push_back( &mBase[i] );
       }
     }
 
@@ -255,22 +281,36 @@ void IasAvbPacketPool::cleanup()
                 uint32_t(mFreeBufferStack.size()), "/", mPoolSize);
   }
 
-  device_t* igbDevice = IasAvbStreamHandlerEnvironment::getIgbDevice();
-
-  while (!mDmaPages.empty())
+  if (mDirectDmaEn)
   {
-    Page* page = mDmaPages.back();
-    mDmaPages.pop_back();
+    device_t* igbDevice = IasAvbStreamHandlerEnvironment::getIgbDevice();
 
-    AVB_ASSERT( NULL != page  );
-
-    if (NULL == igbDevice)
+    while (!mDmaPages.empty())
     {
+      Page* page = mDmaPages.back();
+      mDmaPages.pop_back();
+
+      AVB_ASSERT( NULL != page  );
+
+      if (NULL == igbDevice)
+      {
+      }
+      else
+      {
+        igb_dma_free_page( igbDevice, page );
+        delete page;
+      }
     }
-    else
+  }
+  else  // if !mDirectDmaEn
+  {
+    for (uint32_t i = 0; i < mPoolSize; i++)
     {
-      igb_dma_free_page( igbDevice, page );
-      delete page;
+      if (mBase[i].vaddr)
+      {
+        (void) free(mBase[i].vaddr);
+        mBase[i].vaddr = nullptr;
+      }
     }
   }
 

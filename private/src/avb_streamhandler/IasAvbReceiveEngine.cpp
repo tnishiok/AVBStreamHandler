@@ -89,6 +89,7 @@ IasAvbReceiveEngine::IasAvbReceiveEngine()
 , mRecoverIgbReceiver(true)
 #endif /* DIRECT_RX_DMA */
 , mRcvPortIfIndex(0)
+, mDirectDmaEn(true)
 {
   DLT_LOG_CXX(*mLog, DLT_LOG_VERBOSE, LOG_PREFIX);
 }
@@ -132,29 +133,37 @@ IasAvbProcessingResult IasAvbReceiveEngine::init()
       result = eIasAvbProcInitializationFailed;
     }
 
-#if !defined(DIRECT_RX_DMA)
+
     if (eIasAvbProcOK == result)
     {
-      mReceiveBuffer = new (nothrow) uint8_t[cReceiveBufferSize];
-      if (NULL == mReceiveBuffer)
+      std::string nwIfType = "direct-dma";
+      (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cNwIfType, nwIfType);
+      if ("direct-dma" != nwIfType)
       {
-        /**
-         * @log Init failed: Not enough memory to create the buffer.
+        mDirectDmaEn = false;
+        mReceiveBuffer = new (nothrow) uint8_t[cReceiveBufferSize];
+        if (NULL == mReceiveBuffer)
+        {
+          /**
+           * @log Init failed: Not enough memory to create the buffer.
+           */
+          DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "Couldn't create receive buffer!");
+          result = eIasAvbProcInitializationFailed;
+        }
+      }
+      else
+      {
+        (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cRxRecoverIgbReceiver, mRecoverIgbReceiver);
+        DLT_LOG_CXX(*mLog, DLT_LOG_DEBUG, LOG_PREFIX, "Rx IGB Recovery:", mRecoverIgbReceiver ? "on" : "off");
+
+        /*
+         * Note: In the direct DMA mode the receive engine does not use the raw socket
+         * to receive packets, but it still relies on the socket to set multicast mac
+         * addresses to network interface. That's why still openReceiveSocket is called.
          */
-        DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "Couldn't create receive buffer!");
-        result = eIasAvbProcInitializationFailed;
       }
     }
-#else
-    (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cRxRecoverIgbReceiver, mRecoverIgbReceiver);
-    DLT_LOG_CXX(*mLog, DLT_LOG_DEBUG, LOG_PREFIX, "Rx IGB Recovery:", mRecoverIgbReceiver ? "on" : "off");
 
-    /*
-     * Note: In the direct DMA mode the receive engine does not use the raw socket
-     * to receive packets, but it still relies on the socket to set multicast mac
-     * addresses to network interface. That's why still openReceiveSocket is called.
-     */
-#endif /* !DIRECT_RX_DMA */
     if (eIasAvbProcOK == result)
     {
       result = openReceiveSocket();
@@ -258,10 +267,11 @@ IasAvbProcessingResult IasAvbReceiveEngine::start()
 
   DLT_LOG_CXX(*mLog, DLT_LOG_VERBOSE, LOG_PREFIX);
 
-#if defined(DIRECT_RX_DMA)
-  /* Start direct DMA for RX */
-  result = startIgbReceiveEngine();
-#endif /* DIRECT_RX_DMA */
+  if (mDirectDmaEn)
+  {
+    /* Start direct DMA for RX */
+    result = startIgbReceiveEngine();
+  }
 
   if (eIasAvbProcOK == result)
   {
@@ -282,12 +292,10 @@ IasAvbProcessingResult IasAvbReceiveEngine::start()
       result = eIasAvbProcNullPointerAccess;
     }
 
-#if defined(DIRECT_RX_DMA)
-    if (eIasAvbProcOK != result)
+    if ((mDirectDmaEn) && (eIasAvbProcOK != result))
     {
       (void) stopIgbReceiveEngine();
     }
-#endif /* DIRECT_RX_DMA */
   }
 
   if (eIasAvbProcOK == result)
@@ -320,9 +328,10 @@ IasAvbProcessingResult IasAvbReceiveEngine::stop()
       }
       else
       {
-#if defined(DIRECT_RX_DMA)
-        (void) stopIgbReceiveEngine();
-#endif /* DIRECT_RX_DMA */
+        if (mDirectDmaEn)
+        {
+          (void) stopIgbReceiveEngine();
+        }
       }
     }
   }
@@ -804,40 +813,39 @@ IasAvbProcessingResult IasAvbReceiveEngine::openReceiveSocket()
     }
   }
 
-#if defined(DIRECT_RX_DMA)
-  (void) argSize;
-#else
-  if (eIasAvbProcOK == result)
+  if (!mDirectDmaEn)
   {
-    if (IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cRxSocketRxBufSize, bufSize))
+    if (eIasAvbProcOK == result)
     {
-      // This is not needed for the direct RX mode and even worse it requires the cap_net_admin privilege.
-      if (setsockopt(mReceiveSocket, SOL_SOCKET, SO_RCVBUFFORCE, &bufSize, sizeof bufSize) < 0)
+      if (IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cRxSocketRxBufSize, bufSize))
       {
-        /**
-         * @log Init failed: The receive buffer size could not be set.
-         */
-        DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "failed to set RCV buffer size: ",
+        // This is not needed for the direct RX mode and even worse it requires the cap_net_admin privilege.
+        if (setsockopt(mReceiveSocket, SOL_SOCKET, SO_RCVBUFFORCE, &bufSize, sizeof bufSize) < 0)
+        {
+          /**
+           * @log Init failed: The receive buffer size could not be set.
+           */
+          DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "failed to set RCV buffer size: ",
+              int32_t(errno), " (", strerror(errno), ")");
+          result = eIasAvbProcInitializationFailed;
+        }
+      }
+    }
+
+    if (eIasAvbProcOK == result)
+    {
+      if (getsockopt(mReceiveSocket, SOL_SOCKET, SO_RCVBUF, &bufSize, &argSize) < 0)
+      {
+        DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "warning: failed to read RCV buffer size: ",
             int32_t(errno), " (", strerror(errno), ")");
-        result = eIasAvbProcInitializationFailed;
+      }
+      else
+      {
+        DLT_LOG_CXX(*mLog, DLT_LOG_INFO, LOG_PREFIX, "socket RCV buffer size is ",
+            (bufSize/2), " (", bufSize , "real)");
       }
     }
   }
-
-  if (eIasAvbProcOK == result)
-  {
-    if (getsockopt(mReceiveSocket, SOL_SOCKET, SO_RCVBUF, &bufSize, &argSize) < 0)
-    {
-      DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "warning: failed to read RCV buffer size: ",
-          int32_t(errno), " (", strerror(errno), ")");
-    }
-    else
-    {
-      DLT_LOG_CXX(*mLog, DLT_LOG_INFO, LOG_PREFIX, "socket RCV buffer size is ",
-          (bufSize/2), " (", bufSize , "real)");
-    }
-  }
-#endif
 
   if (eIasAvbProcOK == result)
   {
@@ -920,15 +928,15 @@ IasResult IasAvbReceiveEngine::run()
     DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "Error setting scheduler parameter: ", strerror(errval));
   }
 
-#if defined(DIRECT_RX_DMA)
+
   IasAvbPacket* packet = NULL;
   uint32_t elapsedTimeNs = 0u; /* elapsed time (ns) without packet reception */
   uint32_t count = 0;
-#else
+
   fd_set readSet;
   fd_set exceptSet;
   timeval selectWaitTime;
-#endif /* DIRECT_RX_DMA */
+
   int32_t selectResult;
   IasAvbStreamId wildcardId(uint64_t(0u));
   IasAvbMacAddress wildcardMac;
@@ -940,10 +948,13 @@ IasResult IasAvbReceiveEngine::run()
   bool doDiscardByPts;
 
   (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cRxCycleWait, cycleWait);
-#if defined(DIRECT_RX_DMA)
-  /* cycleWait must be a non-zero value to calculate the time-out value */
-  AVB_ASSERT(cycleWait != 0u);
-#endif
+
+  if (mDirectDmaEn)
+  {
+    /* cycleWait must be a non-zero value to calculate the time-out value */
+    AVB_ASSERT(cycleWait != 0u);
+  }
+
   if (IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cRxIdleWait, idleWait))
   {
     // config value is specified in ns
@@ -968,31 +979,34 @@ IasResult IasAvbReceiveEngine::run()
       ::sleep( 1u );
     }
 
-#if defined(DIRECT_RX_DMA)
-    if ((elapsedTimeNs / 1000) >= idleWait) /* us */
+    if (mDirectDmaEn)
     {
-      /* invoke the error handling since the 'idleWait' time elapsed without packet reception */
-      selectResult  = 0u;
+      if ((elapsedTimeNs / 1000) >= idleWait) /* us */
+      {
+        /* invoke the error handling since the 'idleWait' time elapsed without packet reception */
+        selectResult  = 0u;
 
-      /* reset the counter */
-      elapsedTimeNs = 0u;
+        /* reset the counter */
+        elapsedTimeNs = 0u;
+      }
+      else
+      {
+        /* poll the network interface to retrieve a received packet */
+        selectResult = 1u;
+      }
     }
     else
     {
-      /* poll the network interface to retrieve a received packet */
-      selectResult = 1u;
+      FD_ZERO(&readSet);
+      FD_SET(mReceiveSocket, &readSet);
+      FD_ZERO(&exceptSet);
+      FD_SET(mReceiveSocket, &exceptSet);
+
+      selectWaitTime.tv_sec = 0u;
+      selectWaitTime.tv_usec = idleWait;
+
+      selectResult = select( FD_SETSIZE, &readSet, NULL, &exceptSet, &selectWaitTime );
     }
-#else
-    FD_ZERO(&readSet);
-    FD_SET(mReceiveSocket, &readSet);
-    FD_ZERO(&exceptSet);
-    FD_SET(mReceiveSocket, &exceptSet);
-
-    selectWaitTime.tv_sec = 0u;
-    selectWaitTime.tv_usec = idleWait;
-
-    selectResult = select( FD_SETSIZE, &readSet, NULL, &exceptSet, &selectWaitTime );
-#endif /* DIRECT_RX_DMA */
 
     // should "now" be updated here rather than after the nanosleep?
 
@@ -1060,88 +1074,90 @@ IasResult IasAvbReceiveEngine::run()
       }
       else
       {
-#if !DIRECT_RX_DMA
-        if (FD_ISSET(mReceiveSocket, &readSet))
-#endif /* !DIRECT_RX_DMA */
+        if ((mDirectDmaEn) || (FD_ISSET(mReceiveSocket, &readSet)))
         {
           (void) lock(); // protect mAvbStreams
 
           for(;;)
           {
-#if defined(DIRECT_RX_DMA)
-            if (NULL != packet)
+            if (mDirectDmaEn)
             {
-              /* put back the used packet buffer */
-              if (igb_refresh_buffers(mIgbDevice, eRxQueue0, reinterpret_cast<struct igb_packet **>(&packet), 1u) == 0)
+              if (NULL != packet)
               {
-                packet = NULL;
-              }
-            }
-
-            /* reset the variable */
-            recv_length = -1u;
-
-            if (NULL == packet)
-            {
-#if defined(DEBUG_LISTENER_UNCERTAINTY)
-              const uint64_t rxTstamp = ptp->getLocalTime();
-              const size_t rxTstampSz = sizeof(rxTstamp);
-#endif
-              /* try getting a received packet */
-              count = 1u;
-              if (igb_receive(mIgbDevice, eRxQueue0, reinterpret_cast<struct igb_packet **>(&packet), &count) == 0)
-              {
-                if (NULL != packet)
+                /* put back the used packet buffer */
+                if (igb_refresh_buffers(mIgbDevice, eRxQueue0, reinterpret_cast<struct igb_packet **>(&packet), 1u) == 0)
                 {
-                  /* a packet is available */
-                  mReceiveBuffer = reinterpret_cast<uint8_t*>(packet->getBasePtr());
-                  recv_length = packet->len;
-
-                  /* reset the counter */
-                  elapsedTimeNs = 0u;
-
-#if defined(DEBUG_LISTENER_UNCERTAINTY)
-                  /* DO NOT ENABLE THESE LINES FOR PRODUCTION SW */
-                  if ((recv_length + rxTstampSz) <= cReceiveBufferSize)
-                  {
-                    /*
-                     * put the current time to the bottom of the receive buffer
-                     * assuming the received packet size is smaller than the buffer size of 2KB
-                     */
-                    uint64_t rxTstampBuf = uint64_t((mReceiveBuffer + recv_length + (rxTstampSz - 1u))) & ~(rxTstampSz - 1u);
-
-                    // insert the received timestamp to the buffer just after the payload
-                    *((uint64_t*)rxTstampBuf) = rxTstamp;
-                  }
-#endif
+                  packet = NULL;
                 }
               }
-              else
-              {
-                /*
-                 * RCTL.RXEN bit could mistakenly be turned off as initializing i210's direct rx mode if some programs
-                 * such as ifconfig or commnand concurrently access network interface on i210. This will drop all
-                 * incoming packets. Root cause is synchronization problem between libigb (user-side) and igb_avb
-                 * (kernel-side). As a workaround, monitor the bit if there is no incoming packet and enable it in case.
-                 * (defect: 201518)
-                 */
-                if (mRecoverIgbReceiver)
-                {
-                  uint32_t rctlReg = 0u;
-                  (void) igb_readreg(mIgbDevice, RCTL, &rctlReg);
-                  if (!(rctlReg & RCTL_RXEN))
-                  {
-                    rctlReg |= RCTL_RXEN;
-                    (void) igb_writereg(mIgbDevice, RCTL, rctlReg);
 
-                    DLT_LOG_CXX(*mLog, DLT_LOG_DEBUG, LOG_PREFIX, "Rx IGB Recovery: enabled RCTL.RXEN ( regval =", rctlReg, ")");
+              /* reset the variable */
+              recv_length = -1u;
+
+              if (NULL == packet)
+              {
+#if defined(DEBUG_LISTENER_UNCERTAINTY)
+                const uint64_t rxTstamp = ptp->getLocalTime();
+                const size_t rxTstampSz = sizeof(rxTstamp);
+#endif
+                /* try getting a received packet */
+                count = 1u;
+                if (igb_receive(mIgbDevice, eRxQueue0, reinterpret_cast<struct igb_packet **>(&packet), &count) == 0)
+                {
+                  if (NULL != packet)
+                  {
+                    /* a packet is available */
+                    mReceiveBuffer = reinterpret_cast<uint8_t*>(packet->getBasePtr());
+                    recv_length = packet->len;
+
+                    /* reset the counter */
+                    elapsedTimeNs = 0u;
+
+#if defined(DEBUG_LISTENER_UNCERTAINTY)
+                    /* DO NOT ENABLE THESE LINES FOR PRODUCTION SW */
+                    if ((recv_length + rxTstampSz) <= cReceiveBufferSize)
+                    {
+                      /*
+                       * put the current time to the bottom of the receive buffer
+                       * assuming the received packet size is smaller than the buffer size of 2KB
+                       */
+                      uint64_t rxTstampBuf = uint64_t((mReceiveBuffer + recv_length + (rxTstampSz - 1u))) & ~(rxTstampSz - 1u);
+
+                      // insert the received timestamp to the buffer just after the payload
+                      *((uint64_t*)rxTstampBuf) = rxTstamp;
+                    }
+#endif
+                  }
+                }
+                else
+                {
+                  /*
+                   * RCTL.RXEN bit could mistakenly be turned off as initializing i210's direct rx mode if some programs
+                   * such as ifconfig or commnand concurrently access network interface on i210. This will drop all
+                   * incoming packets. Root cause is synchronization problem between libigb (user-side) and igb_avb
+                   * (kernel-side). As a workaround, monitor the bit if there is no incoming packet and enable it in case.
+                   * (defect: 201518)
+                   */
+                  if (mRecoverIgbReceiver)
+                  {
+                    uint32_t rctlReg = 0u;
+                    (void) igb_readreg(mIgbDevice, RCTL, &rctlReg);
+                    if (!(rctlReg & RCTL_RXEN))
+                    {
+                      rctlReg |= RCTL_RXEN;
+                      (void) igb_writereg(mIgbDevice, RCTL, rctlReg);
+
+                      DLT_LOG_CXX(*mLog, DLT_LOG_DEBUG, LOG_PREFIX, "Rx IGB Recovery: enabled RCTL.RXEN ( regval =", rctlReg, ")");
+                    }
                   }
                 }
               }
             }
-#else
-            recv_length = static_cast<int32_t>(recvfrom(mReceiveSocket, &mReceiveBuffer[0], cReceiveBufferSize, MSG_DONTWAIT, NULL, NULL ));
-#endif /* DIRECT_RX_DMA */
+            else
+            {
+              recv_length = static_cast<int32_t>(recvfrom(mReceiveSocket, &mReceiveBuffer[0], cReceiveBufferSize, MSG_DONTWAIT, NULL, NULL ));
+            }
+
             if (recv_length < 0)
             {
               const int32_t err = errno;
@@ -1357,10 +1373,11 @@ IasResult IasAvbReceiveEngine::run()
           req.tv_sec = 0u;
           nanosleep(&req, &rem);
 
-  #if defined(DIRECT_RX_DMA)
-          /* increment the time-out counter */
-          elapsedTimeNs += cycleWait; /* ns */
-  #endif
+          if (mDirectDmaEn)
+          {
+            /* increment the time-out counter */
+            elapsedTimeNs += cycleWait; /* ns */
+          }
         }
       }
     }
@@ -1464,10 +1481,11 @@ void IasAvbReceiveEngine::cleanup()
   delete mReceiveThread;
   mReceiveThread = NULL;
 
-#if !defined(DIRECT_RX_DMA)
-  delete[] mReceiveBuffer;
-  mReceiveBuffer = NULL;
-#endif /* !DIRECT_RX_DMA */
+  if (!mDirectDmaEn)
+  {
+    delete[] mReceiveBuffer;
+    mReceiveBuffer = NULL;
+  }
 
   if (mWatchdog)
   {
@@ -1501,9 +1519,10 @@ void IasAvbReceiveEngine::cleanup()
 
   (void) closeSocket();
 
-#if defined(DIRECT_RX_DMA)
-  (void) stopIgbReceiveEngine();
-#endif /* DIRECT_RX_DMA */
+  if (mDirectDmaEn)
+  {
+    (void) stopIgbReceiveEngine();
+  }
 }
 
 bool IasAvbReceiveEngine::getAvbStreamInfo(const IasAvbStreamId &id,
@@ -1925,8 +1944,7 @@ IasAvbProcessingResult IasAvbReceiveEngine::bindMcastAddr(const IasAvbMacAddress
 
 void IasAvbReceiveEngine::emergencyShutdown()
 {
-#if defined(DIRECT_RX_DMA)
-  if (NULL != mIgbDevice)
+  if ((mDirectDmaEn) && (NULL != mIgbDevice))
   {
     if (0 == igb_lock(mIgbDevice))
     {
@@ -1943,7 +1961,6 @@ void IasAvbReceiveEngine::emergencyShutdown()
       (void) igb_unlock(mIgbDevice);
     }
   }
-#endif
 }
 
 

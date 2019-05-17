@@ -51,6 +51,10 @@ static const std::string cClassName = "IasAvbTransmitSequencer::";
 #define TQAVCC_QUEUEMODE   0x80000000 /* queue mode, 0=strict, 1=SR mode */
 #define TQAVCTRL_TX_ARB    0x00000100 /* data transmit arbitration */
 
+#ifndef SO_TXTIME
+#define SO_TXTIME 61
+#endif
+
 /*
  *  Constructor.
  */
@@ -77,6 +81,9 @@ IasAvbTransmitSequencer::IasAvbTransmitSequencer(DltContext &ctx)
   , mFirstRun(true)
   , mBTMEnable(false)
   , mStrictPktOrderEn(true)
+  , mDirectDmaEn(false)
+  , mTransmitSocket(-1)
+  , mDescSockAddr()
 {
   DLT_LOG_CXX(*mLog, DLT_LOG_VERBOSE, LOG_PREFIX);
 }
@@ -250,6 +257,18 @@ IasAvbProcessingResult IasAvbTransmitSequencer::init(uint32_t queueIndex, IasAvb
   // the flag ensures xmit packets being sorted in ascending launchtime order but cpu load may increase
   (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cXmitStrictPktOrder, mStrictPktOrderEn);
 
+  std::string nwIfType = "direct-dma";
+  (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cNwIfType, nwIfType);
+  if ("direct-dma" == nwIfType)
+  {
+    mDirectDmaEn = false;
+  }
+
+  if (!mDirectDmaEn)
+  {
+    result = openXmitSock();
+  }
+
   if (eIasAvbProcOK != result)
   {
     cleanup();
@@ -276,6 +295,12 @@ void IasAvbTransmitSequencer::cleanup()
       (void) wdManager->destroyWatchdog(mWatchdog);
       mWatchdog = NULL;
     }
+  }
+
+  if (mDirectDmaEn)
+  {
+    (void) close(mTransmitSocket);
+    mTransmitSocket = -1;
   }
 }
 
@@ -935,7 +960,15 @@ IasAvbTransmitSequencer::DoneState IasAvbTransmitSequencer::serviceStream(uint64
           }
 #endif
 
-          result = current.packet->xmit(mIgbDevice, mQueueIndex);
+          if (mDirectDmaEn)
+          {
+            result = current.packet->xmit(mIgbDevice, mQueueIndex);
+          }
+          else
+          {
+            result = sockXmit(current.packet);
+          }
+
           if (mFirstRun && mBTMEnable)
           {
             mFirstRun = false;
@@ -1348,7 +1381,10 @@ IasAvbProcessingResult IasAvbTransmitSequencer::addStreamToTransmitList(IasAvbSt
             }
           }
 
-          updateShaper();
+          if (mDirectDmaEn)
+          {
+            updateShaper();
+          }
         }
 
         {
@@ -1444,7 +1480,10 @@ IasAvbProcessingResult IasAvbTransmitSequencer::removeStreamFromTransmitList(Ias
           }
         }
 
-        updateShaper();
+        if (mDirectDmaEn)
+        {
+          updateShaper();
+        }
       }
     }
   }
@@ -1561,6 +1600,119 @@ void IasAvbTransmitSequencer::updateShaper()
         "IdleSlope:", idleSlope,
         "");
   }
+}
+
+IasAvbProcessingResult IasAvbTransmitSequencer::openXmitSock()
+{
+  IasAvbProcessingResult result = eIasAvbProcErr;
+
+  if (-1 != mTransmitSocket)
+  {
+    result = eIasAvbProcInitializationFailed;
+  }
+  else
+  {
+    mTransmitSocket = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    if (0 > mTransmitSocket)
+    {
+      DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "socket open error", errno);
+    }
+    else
+    {
+      const std::string* ifname = IasAvbStreamHandlerEnvironment::getNetworkInterfaceName();
+      if (ifname)
+      {
+         mDescSockAddr.sll_family = AF_PACKET;
+         mDescSockAddr.sll_protocol = htons(ETH_P_ALL);
+         mDescSockAddr.sll_ifindex = if_nametoindex(ifname->c_str());
+         mDescSockAddr.sll_halen = ETH_ALEN;
+      }
+
+      int priority = 3; // to be adjustable
+      if (setsockopt(mTransmitSocket, SOL_SOCKET, SO_PRIORITY, &priority, sizeof(priority)) < 0)
+      {
+        DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "socket SO_PRIORITY option error", strerror(errno));
+      }
+
+      struct sock_txtime {
+        clockid_t clockid;
+        uint16_t flags;
+      };
+
+      struct sock_txtime sk_txtime {CLOCK_TAI, 0};
+      if (setsockopt(mTransmitSocket, SOL_SOCKET, SO_TXTIME, &sk_txtime, sizeof(sk_txtime)) < 0)
+      {
+         DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "socket SO_TXTIME option error", strerror(errno));
+      }
+
+      result = eIasAvbProcOK;
+    }
+  }
+
+  return result;
+}
+
+int IasAvbTransmitSequencer::sockXmit(IasAvbPacket *packet)
+{
+  int result = EBADF;
+
+  uint32_t frameLen = packet->len;
+  uint8_t *buffer = (uint8_t *)packet->getBasePtr();
+
+  if (nullptr != buffer)
+  {
+    uint8_t *dest_addr = buffer;
+
+    struct cmsghdr *cmsg;
+    struct iovec iov;
+    struct msghdr msg = {};
+    char control[CMSG_SPACE(sizeof(uint64_t))] = {};
+
+    // TODO: update StreamData to hold an each dest addr
+    mDescSockAddr.sll_addr[0] = dest_addr[0];
+    mDescSockAddr.sll_addr[1] = dest_addr[1];
+    mDescSockAddr.sll_addr[2] = dest_addr[2];
+    mDescSockAddr.sll_addr[3] = dest_addr[3];
+    mDescSockAddr.sll_addr[4] = dest_addr[4];
+    mDescSockAddr.sll_addr[5] = dest_addr[5];
+
+    msg.msg_name = (struct sockaddr *)&mDescSockAddr;
+    msg.msg_namelen = sizeof(struct sockaddr_ll);
+
+    /* A struct iovec is a base pointer/length pair that is one element of a
+    scatter/gather vector; we only need a 1-element vector */
+    iov.iov_base = buffer;
+    iov.iov_len = frameLen;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+
+    /* Our control message is stored in the weird union value u, which has some odd size and
+       alignment requirements I don't fully understand yet */
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof control;
+
+    /* The cmsg API is full of weird unfortunate macros that are poorly documented. */
+    cmsg = CMSG_FIRSTHDR(&msg); // This extracts the first cmsghdr address from the msg
+    cmsg->cmsg_level = SOL_SOCKET; // handled in socket driver for AF_PACKET sockets
+    cmsg->cmsg_type = SCM_TXTIME; // This is the new message type we added
+    cmsg->cmsg_len = CMSG_LEN(sizeof(uint64_t));
+    *((__u64 *) CMSG_DATA(cmsg)) = packet->attime;
+
+    /* Send packet */
+    errno = 0;
+    ssize_t xmitBytes = sendmsg(mTransmitSocket, &msg, 0);
+    if (0 > xmitBytes)
+    {
+      result = errno;
+    }
+    else
+    {
+      IasAvbPacketPool::returnPacket(packet);
+      result = 0;
+    }
+  }
+
+  return result;
 }
 
 

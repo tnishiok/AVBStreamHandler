@@ -295,6 +295,7 @@ class IasAvbTransmitEngine : private IasAvbStreamHandlerEventInterface
     IasAvbStreamHandlerEventInterface *mEventInterface;
     DltContext     *mLog;           // context for Log & Trace
     bool               mBTMEnable;
+    bool               mDirectDmaEn;
 };
 
 inline bool IasAvbTransmitEngine::isInitialized() const

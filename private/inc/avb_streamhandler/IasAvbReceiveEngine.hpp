@@ -400,6 +400,7 @@ class IasAvbReceiveEngine : private IasMediaTransportAvb::IasIRunnable
     bool               mRecoverIgbReceiver;
 #endif /* DIRECT_RX_DMA */
     int32_t              mRcvPortIfIndex;
+    bool               mDirectDmaEn;
 };
 
 inline void IasAvbReceiveEngine::closeSocket()

@@ -53,6 +53,7 @@ IasAvbTransmitEngine::IasAvbTransmitEngine()
   , mEventInterface(NULL)
   , mLog(&IasAvbStreamHandlerEnvironment::getDltContext("_TXE"))
   , mBTMEnable(false)
+  , mDirectDmaEn(true)
 {
   DLT_LOG_CXX(*mLog, DLT_LOG_VERBOSE, LOG_PREFIX);
 }
@@ -91,7 +92,14 @@ IasAvbProcessingResult IasAvbTransmitEngine::init()
     result = eIasAvbProcInitializationFailed;
   }
 
-  if (eIasAvbProcOK == result)
+  std::string nwIfType = "direct-dma";
+  (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cNwIfType, nwIfType);
+  if ("direct-dma" != nwIfType)
+  {
+    mDirectDmaEn = false;
+  }
+
+  if ((mDirectDmaEn) && (eIasAvbProcOK == result))
   {
     uint64_t val = 0u;
     (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cXmitUseShaper, val);
@@ -252,18 +260,21 @@ void IasAvbTransmitEngine::updateLinkStatus(const bool linkIsUp)
     }
     else
     {
-      if (mIgbDevice)
+      if (mDirectDmaEn)
       {
-        const int32_t err = igb_set_class_bandwidth( mIgbDevice, 0u, 0u, 1500u, 64u ); /* Qav disabled*/
-        if (err < 0)
+        if (mIgbDevice)
         {
-            DLT_LOG_CXX(*mLog, DLT_LOG_WARN, LOG_PREFIX, "Couldn't configure shaper: ",
-                strerror(err));
+          const int32_t err = igb_set_class_bandwidth( mIgbDevice, 0u, 0u, 1500u, 64u ); /* Qav disabled*/
+          if (err < 0)
+          {
+              DLT_LOG_CXX(*mLog, DLT_LOG_WARN, LOG_PREFIX, "Couldn't configure shaper: ",
+                  strerror(err));
+          }
         }
-      }
-      else
-      {
-        DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "mIgbDevice == NULL!");
+        else
+        {
+          DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "mIgbDevice == NULL!");
+        }
       }
     }
   }
@@ -300,7 +311,7 @@ IasAvbProcessingResult IasAvbTransmitEngine::start()
   {
     if (mUseResume)
     {
-      if (mIgbDevice)
+      if (mIgbDevice && mDirectDmaEn)
       {
         int32_t err = -1;
         uint32_t errCount = 0u;
@@ -857,15 +868,18 @@ void IasAvbTransmitEngine::updateShapers()
     bwLow = (bwLow + 3999u) / 4000u;
   }
 
-  /* hack: call the igb function with a pseudo packet size of 83 bytes payload, since this would results
-   * in a packet on the wire of exactly 1000bits, which enables us to use the class_a and class_b
-   * parameters to specify the bandwidth in kbit/observationInterval
-   */
-  const int32_t err = igb_set_class_bandwidth(mIgbDevice, bwHigh, bwLow, 83u, 83u);
-  if (err < 0)
+  if (mDirectDmaEn)
   {
-      DLT_LOG_CXX(*mLog, DLT_LOG_WARN, LOG_PREFIX, "Couldn't configure shaper: ",
-          strerror(err));
+    /* hack: call the igb function with a pseudo packet size of 83 bytes payload, since this would results
+     * in a packet on the wire of exactly 1000bits, which enables us to use the class_a and class_b
+     * parameters to specify the bandwidth in kbit/observationInterval
+     */
+    const int32_t err = igb_set_class_bandwidth(mIgbDevice, bwHigh, bwLow, 83u, 83u);
+    if (err < 0)
+    {
+        DLT_LOG_CXX(*mLog, DLT_LOG_WARN, LOG_PREFIX, "Couldn't configure shaper: ",
+            strerror(err));
+    }
   }
 }
 

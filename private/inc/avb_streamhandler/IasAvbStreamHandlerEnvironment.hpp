@@ -123,6 +123,7 @@ static const char cPtpLoopSleep[] = "ptp.loopsleep"; // ns
 static const char cPtpLoopCount[] = "ptp.loopcount"; //
 static const char cPtpXtstampThresh[] = "ptp.xtstamp.threshold"; // ns
 static const char cPtpXtstampLoopCount[] = "ptp.xtstamp.loopcount"; //
+static const char cPtpDaemon[] = "ptp.daemon"; // daemon_cl or ptp4l
 static const char cVideoInNumPackets[] = "video.in.numpackets"; // video in ringbuffer size // TODO:???
 static const char cVideoOutNumPackets[] = "video.out.numpackets"; // video out ringbuffer size // TODO:???
 static const char cXmitVideoPoolsize[] = "transmit.video.poolsize"; // pool size for avb video transmit streams
@@ -142,6 +143,7 @@ static const char cAlsaSyncRxReadStart[] = "alsa.sync.rx.read.start"; // skip ti
 static const char cDiagnosticPacketDmac[] = "diagnosticpacket.dmac"; // (UInt64, default:0x011BC50AC000) sets the destination MAC address for the diagnostic packet specified in AutoCDS.
 static const char cIgbAccessTimeoutCnt[] = "igb.access.to.cnt"; // Timeout:cIgbAccessSleep (in us: 100 ms) * cIgbAccessTimeoutCnt
 static const char cApiMutex[] = "api.control.mutex"; // switch API mutex 1=enable (default), 0=off
+static const char cNwIfType[] = "network.interface.type"; ///< (std::string) network interface type to be used (direct-dma or socket)
 }
 //@}
 

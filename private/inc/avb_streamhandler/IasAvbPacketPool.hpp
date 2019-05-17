@@ -95,6 +95,7 @@ class IasAvbPacketPool
     PacketStack mFreeBufferStack;
     IasAvbPacket* mBase;
     PageList mDmaPages;
+    bool mDirectDmaEn;
 };
 
 

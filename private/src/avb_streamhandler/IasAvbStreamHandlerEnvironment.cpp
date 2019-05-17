@@ -149,8 +149,13 @@ IasAvbStreamHandlerEnvironment::~IasAvbStreamHandlerEnvironment()
 
   if (NULL != mIgbDevice)
   {
-    DLT_LOG_CXX(*mLog,  DLT_LOG_INFO, LOG_PREFIX, "igb_detach");
-    igb_detach(mIgbDevice); // @@WARN: This will seg fault without the correct capabilities
+    std::string nwIfType = "direct-dma";
+    (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cNwIfType, nwIfType);
+    if ("direct-dma" == nwIfType)
+    {
+      DLT_LOG_CXX(*mLog,  DLT_LOG_INFO, LOG_PREFIX, "igb_detach");
+      igb_detach(mIgbDevice); // @@WARN: This will seg fault without the correct capabilities
+    }
   }
   delete mIgbDevice;
   mIgbDevice = NULL;
@@ -203,8 +208,13 @@ void IasAvbStreamHandlerEnvironment::emergencyShutdown()
     DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "igb device might be unstable");
     if (NULL != mIgbDevice)
     {
-      DLT_LOG_CXX(*mLog,  DLT_LOG_ERROR, LOG_PREFIX, "igb_detach");
-      igb_detach(mIgbDevice); // @@WARN: This will seg fault without the correct capabilities
+      std::string nwIfType = "direct-dma";
+      (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cNwIfType, nwIfType);
+      if ("direct-dma" == nwIfType)
+      {
+        DLT_LOG_CXX(*mLog,  DLT_LOG_ERROR, LOG_PREFIX, "igb_detach");
+        igb_detach(mIgbDevice); // @@WARN: This will seg fault without the correct capabilities
+      }
       delete mIgbDevice;
       mIgbDevice = NULL;
     }
@@ -435,58 +445,59 @@ IasAvbProcessingResult IasAvbStreamHandlerEnvironment::createIgbDevice()
         }
         else
         {
-          (void) ::snprintf(devPath, cPciPathMaxLen, "%04x:%02x:%02x.%d", mIgbDevice->domain, mIgbDevice->bus, mIgbDevice->dev, mIgbDevice->func);
+          std::string nwIfType = "direct-dma";
+          (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cNwIfType, nwIfType);
+          if ("direct-dma" == nwIfType)
+          {
+            (void) ::snprintf(devPath, cPciPathMaxLen, "%04x:%02x:%02x.%d", mIgbDevice->domain, mIgbDevice->bus, mIgbDevice->dev, mIgbDevice->func);
 
-          err = igb_attach(devPath, mIgbDevice);
-          if (err)
-          {
-            DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "igb_attach for",
-                mInterfaceName.c_str(), "at",
-                devPath, "failed (", int32_t(err),
-                ",", strerror(err), ")");
-            ret = eIasAvbProcInitializationFailed;
-          }
-          else
-          {
-            DLT_LOG_CXX(*mLog,  DLT_LOG_INFO, LOG_PREFIX, "igb_attach OK");
-#if defined(DIRECT_RX_DMA)
-            err = igb_attach_rx(mIgbDevice);
+            err = igb_attach(devPath, mIgbDevice);
             if (err)
             {
-              DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "igb_attach_rx failed (",
-                  int32_t(err), ")");
+              DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "igb_attach for",
+                  mInterfaceName.c_str(), "at",
+                  devPath, "failed (", int32_t(err),
+                  ",", strerror(err), ")");
               ret = eIasAvbProcInitializationFailed;
             }
             else
             {
-#endif /* DIRECT_RX_DMA */
-              err = igb_attach_tx(mIgbDevice);
-              if (err)
-              {
-                DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "igb_attach_tx failed (",
-                    int32_t(err), ")");
-                ret = eIasAvbProcInitializationFailed;
-              }
-#if defined(DIRECT_RX_DMA)
-            }
+              DLT_LOG_CXX(*mLog,  DLT_LOG_INFO, LOG_PREFIX, "igb_attach OK");
 
-            if (eIasAvbProcOK == ret)
-#else
-            else
-#endif /* DIRECT_RX_DMA */
-            {
-              err = igb_init(mIgbDevice);
+              err = igb_attach_rx(mIgbDevice);
               if (err)
               {
-                DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "igb_init failed (",
+                DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "igb_attach_rx failed (",
                     int32_t(err), ")");
                 ret = eIasAvbProcInitializationFailed;
               }
-            }
-            if (eIasAvbProcOK != ret)
-            {
-              DLT_LOG_CXX(*mLog,  DLT_LOG_ERROR, LOG_PREFIX, "igb_detach (init failed)");
-              igb_detach(mIgbDevice);
+
+              if (eIasAvbProcOK == ret)
+              {
+                err = igb_attach_tx(mIgbDevice);
+                if (err)
+                {
+                  DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "igb_attach_tx failed (",
+                    int32_t(err), ")");
+                  ret = eIasAvbProcInitializationFailed;
+                }
+              }
+
+              if (eIasAvbProcOK == ret)
+              {
+                err = igb_init(mIgbDevice);
+                if (err)
+                {
+                  DLT_LOG_CXX(*mLog, DLT_LOG_ERROR, LOG_PREFIX, "igb_init failed (",
+                      int32_t(err), ")");
+                  ret = eIasAvbProcInitializationFailed;
+                }
+              }
+              if (eIasAvbProcOK != ret)
+              {
+                DLT_LOG_CXX(*mLog,  DLT_LOG_ERROR, LOG_PREFIX, "igb_detach (init failed)");
+                igb_detach(mIgbDevice);
+              }
             }
           }
         }
@@ -800,6 +811,9 @@ void IasAvbStreamHandlerEnvironment::setDefaultConfigValues()
 
   // Timeout:cIgbAccessSleep (in us: 100 ms) * cIgbAccessTimeoutCnt
   setConfigValue(IasRegKeys::cIgbAccessTimeoutCnt, 100u);
+
+  setConfigValue(IasRegKeys::cNwIfType, "direct-dma");
+  setConfigValue(IasRegKeys::cPtpDaemon, "daemon_cl");
 }
 
 bool IasAvbStreamHandlerEnvironment::validateRegistryEntries()
