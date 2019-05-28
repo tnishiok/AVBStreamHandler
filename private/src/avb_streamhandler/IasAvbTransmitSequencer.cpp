@@ -81,7 +81,7 @@ IasAvbTransmitSequencer::IasAvbTransmitSequencer(DltContext &ctx)
   , mFirstRun(true)
   , mBTMEnable(false)
   , mStrictPktOrderEn(true)
-  , mDirectDmaEn(false)
+  , mDirectDmaEn(true)
   , mTransmitSocket(-1)
   , mDescSockAddr()
 {
