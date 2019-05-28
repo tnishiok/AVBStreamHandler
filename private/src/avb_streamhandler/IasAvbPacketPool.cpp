@@ -197,6 +197,7 @@ IasAvbProcessingResult IasAvbPacketPool::init(const size_t packetSize, const uin
     }
     else // if !mDirectDmaEn
     {
+      mPacketSize = packetSize;
       for (uint32_t i = 0; i < poolSize; i++)
       {
         mBase[i].vaddr = calloc(packetSize, 1);

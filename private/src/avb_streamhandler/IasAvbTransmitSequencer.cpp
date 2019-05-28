@@ -259,7 +259,7 @@ IasAvbProcessingResult IasAvbTransmitSequencer::init(uint32_t queueIndex, IasAvb
 
   std::string nwIfType = "direct-dma";
   (void) IasAvbStreamHandlerEnvironment::getConfigValue(IasRegKeys::cNwIfType, nwIfType);
-  if ("direct-dma" == nwIfType)
+  if ("direct-dma" != nwIfType)
   {
     mDirectDmaEn = false;
   }
